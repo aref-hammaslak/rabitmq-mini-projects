@@ -1,0 +1,103 @@
+import amqp from "amqplib";
+
+const RETRY_EX = "retry-ex";
+const RETRY_TTL = 3000;
+const MAX_RETRY = 2;
+const DEAD_EX = "dead-ex";
+const DEAD_QUEUE = "dead-queue";
+const RETRY_QUEUE = "retry-queue";
+const LOGS_EX = "logs-ex";
+const LOGS_QUEUE = "logs-queue";
+
+async function createRetryEX(channel: amqp.Channel) {
+  await channel.assertExchange(RETRY_EX, "direct");
+  const queue = await channel.assertQueue(RETRY_QUEUE, {
+    autoDelete: true,
+    deadLetterExchange: LOGS_EX,
+    deadLetterRoutingKey: "",
+    messageTtl: RETRY_TTL,
+  });
+  channel.bindQueue(queue.queue, RETRY_EX, "");
+  return queue.queue;
+}
+
+async function createDeadLetterEX(channel: amqp.Channel) {
+  await channel.assertExchange(DEAD_EX, "direct");
+  const queue = await channel.assertQueue(DEAD_QUEUE, {
+    exclusive: true,
+    durable: true,
+  });
+  channel.bindQueue(queue.queue, DEAD_EX, "");
+  return queue.queue;
+}
+
+async function main() {
+  const connection = await amqp.connect("amqp://localhost:5672");
+  const channel = await connection.createChannel();
+
+  const args = process.argv.slice(2);
+
+  if (args.length == 0) {
+    console.log("Usage: receive_logs_direct.js [info] [warning] [error]");
+    process.exit(1);
+  }
+
+  await channel.deleteExchange(LOGS_EX);
+  await channel.assertExchange(LOGS_EX, "direct");
+  await createDeadLetterEX(channel);
+
+  const firstQueue = await channel.assertQueue(LOGS_QUEUE, {
+    exclusive: true,
+  });
+  await createRetryEX(channel);
+
+  args.forEach((severity) => {
+    channel.bindQueue(firstQueue.queue, LOGS_EX, severity);
+  });
+  channel.bindQueue(firstQueue.queue, LOGS_EX, "");
+
+  channel.consume(
+    firstQueue.queue,
+    (msg) => {
+      if (!msg) return;
+
+      const randNum = Math.random();
+      const headers = msg.properties.headers || {};
+      const retryCount = headers["x-retry"] || 0;
+
+
+      // Check if max retry exceeded first
+      if (retryCount > MAX_RETRY) {
+        console.log('message failed, send to dead letter queue');
+        channel.publish(DEAD_EX, "", Buffer.from(msg.content.toString()));
+        channel.ack(msg);
+        return; // IMPORTANT: Return here to prevent further processing
+      }
+
+      // Simulate success/failure
+      if (randNum > 0.8) {
+        console.log(
+          ` [*] ${msg.fields.routingKey} : ${msg.content.toString()} : Ack`
+        );
+        channel.ack(msg);
+      } else {
+        console.log('message failed, retry...');
+
+        // Acknowledge the original message
+        channel.ack(msg);
+
+        // Publish to retry exchange
+        channel.publish(RETRY_EX, "", Buffer.from(msg.content.toString()), {
+          headers: {
+            "x-retry": retryCount + 1,
+          },
+        });
+      }
+    },
+    { noAck: false }
+  );
+
+  console.log(" [*] Waiting for logs.");
+}
+
+main();
