@@ -12,11 +12,10 @@ const LOGS_QUEUE = "logs-queue";
 async function createRetryEX(channel: amqp.Channel) {
   await channel.assertExchange(RETRY_EX, "direct");
   const queue = await channel.assertQueue(RETRY_QUEUE, {
-    arguments: {
-      "x-message-ttl": RETRY_TTL,
-      "x-dead-letter-exchange": LOGS_EX,
-      "x-dead-letter-routing-key": "",
-    },
+    autoDelete: true,
+    deadLetterExchange: LOGS_EX,
+    deadLetterRoutingKey: "",
+    messageTtl: RETRY_TTL,
   });
   channel.bindQueue(queue.queue, RETRY_EX, "");
   return queue.queue;
@@ -53,6 +52,7 @@ async function main() {
       const randNum = Math.random();
       const headers = msg.properties.headers || {};
       const retryCount = headers["x-retry"] || 0;
+
 
       // Check if max retry exceeded first
       if (retryCount > MAX_RETRY) {
